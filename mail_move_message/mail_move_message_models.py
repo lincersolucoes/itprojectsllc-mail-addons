@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-from openerp import api
-from openerp import fields
-from openerp import models
-from openerp.tools import email_split
-from openerp.tools.translate import _
+from odoo import api, fields, models
+from odoo.tools import email_split
+from odoo.tools.translate import _
+from odoo.exceptions import MissingError, UserError, ValidationError
 
 
 class Wizard(models.TransientModel):
@@ -108,13 +107,6 @@ class Wizard(models.TransientModel):
             self.model = model
             self.res_id = self.message_id.moved_from_res_id
 
-    @api.onchange('parent_id', 'res_id', 'model')
-    def update_move_back(self):
-        model = self.message_id.moved_from_model
-        self.move_back = self.parent_id == self.message_id.moved_from_parent_id \
-            and self.res_id == self.message_id.moved_from_res_id \
-            and (self.model == model or (not self.model and not model))
-
     @api.onchange('parent_id')
     def on_change_parent_id(self):
         if self.parent_id and self.parent_id.model:
@@ -186,6 +178,8 @@ class Wizard(models.TransientModel):
                 # link with the first message of record
                 parent = self.env['mail.message'].search([('model', '=', r.model), ('res_id', '=', r.res_id)], order='id', limit=1)
                 r.parent_id = parent.id or None
+            if not r.model or not r.res_id:
+                raise UserError(_("You need to fill model and record in order to move the message there."))
 
             r.message_id.move(r.parent_id.id, r.res_id, r.model, r.move_back, r.move_followers)
 
