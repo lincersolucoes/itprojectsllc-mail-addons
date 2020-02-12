@@ -1,79 +1,106 @@
+/*  # Copyright 2018 Artyom Losev <https://it-projects.info/team/ArtyomLosev>
+    # Copyright 2019 Kolushov Alexandr <https://it-projects.info/team/KolushovAlexandr>
+    # License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl.html). */
 odoo.define('mail_sent.sent', function (require) {
 "use strict";
 
-var base_obj = require('mail_base.base');
-
-//-------------------------------------------------------------------------------
-var bus = require('bus.bus').bus;
-var config = require('web.config');
 var core = require('web.core');
-var data = require('web.data');
-var Model = require('web.Model');
 var session = require('web.session');
-var time = require('web.time');
-var web_client = require('web.web_client');
+var Manager = require('mail.Manager');
+var Mailbox = require('mail.model.Mailbox');
+var SearchableThread = require('mail.model.SearchableThread');
 
-var _lt = core._lt;
-//-------------------------------------------------------------------------------
+var _t = core._t;
 
-var ChatAction = core.action_registry.get('mail.chat.instant_messaging');
-ChatAction.include({
-    init: function(parent, action, options) {
-        this._super.apply(this, arguments);
-        var channel_name = 'channel_sent';
-        // Add channel Sent for show "Send message" button
-        this.channels_show_send_button.push(channel_name);
-        // Add channel Sent for enable "display_subject" option
-        this.channels_display_subject.push(channel_name);
-    },
-
-    update_message_on_current_channel: function(current_channel_id, message){
-        var result = this._super.apply(this, arguments);
-        var sent = current_channel_id === "channel_sent" && !message.is_sent;
-        return sent || result;
-    }
-});
-
-// Inherit class and override methods
-base_obj.MailTools.include({
-    get_properties: function(msg){
-        var properties = this._super.apply(this, arguments);
-        properties.is_sent = this.property_descr("channel_sent", msg, this);
-        return properties;
-    },
-
-    set_channel_flags: function(data, msg){
-        this._super.apply(this, arguments);
-        if (data.sent && data.author_id[0] == session.partner_id) {
-            msg.is_sent = true;
+Manager.include({
+    _updateMailboxesFromServer: function (data) {
+        var self = this;
+        this._super(data);
+        if (!_.find(this.getThreads(), function(th){
+            return th.getID() === 'mailbox_channel_sent';
+        })) {
+            this._addMailbox({
+                id: 'channel_sent',
+                name: _t("Sent Messages"),
+                mailboxCounter: 0,
+            });
         }
-        return msg;
     },
 
-    get_channel_array: function(msg){
-        var arr = this._super.apply(this, arguments);
-        return arr.concat('channel_sent');
+    addMessage: function (data, options) {
+        var message = this.getMessage(data.id);
+        if (message) {
+            var current_threads = message._threadIDs;
+            var new_channels = data.channel_ids;
+            if (_.without(new_channels, ...current_threads).length) {
+                message._threadIDs = _.union(new_channels, current_threads);
+            }
+        } else if (data.author_id && data.author_id[0] && odoo.session_info.partner_id &&
+                   data.author_id[0] === odoo.session_info.partner_id) {
+            data.channel_ids.push('mailbox_channel_sent');
+        }
+        return this._super(data, options);
     },
-
-    get_domain: function(channel){
-        return (channel.id === "channel_sent") ? [
-            ['sent', '=', true],
-            ['author_id.user_ids', 'in', [openerp.session.uid]]
-        ] : this._super.apply(this, arguments);
-    }
 });
 
-base_obj.chat_manager.is_ready.then(function(){
-        // Add sent channel
-        base_obj.chat_manager.mail_tools.add_channel({
-            id: "channel_sent",
-            name: _lt("Sent"),
-            type: "static"
+SearchableThread.include({
+     _fetchMessages: function (pDomain, loadMore) {
+        var self = this;
+        if (this._id !== 'mailbox_channel_sent') {
+            return this._super(pDomain, loadMore);
+        }
+
+        // this is a copy-paste from super method
+        var domain = this._getThreadDomain();
+        var cache = this._getCache(pDomain);
+        if (pDomain) {
+            domain = domain.concat(pDomain || []);
+        }
+        if (loadMore) {
+            var minMessageID = cache.messages[0].getID();
+            domain = [['id', '<', minMessageID]].concat(domain);
+        }
+        return this._rpc({
+            model: 'mail.message',
+            method: 'message_fetch',
+            args: [domain],
+            kwargs: this._getFetchMessagesKwargs(),
+        }).then(function (messages) {
+            // except this function. It adds the required thread to downloaded messages
+            _.each(messages, function(m){
+                m.channel_ids.push('mailbox_channel_sent');
+            });
+            if (!cache.allHistoryLoaded) {
+                cache.allHistoryLoaded = messages.length < self._FETCH_LIMIT;
+            }
+            cache.loaded = true;
+            _.each(messages, function (message) {
+                self.call('mail_service', 'addMessage', message, {
+                    silent: true,
+                    domain: pDomain,
+                });
+            });
+            cache = self._getCache(pDomain || []);
+            return cache.messages;
         });
+    },
+});
 
-        return $.when();
-    });
+Mailbox.include({
+    _getThreadDomain: function () {
+        if (this._id === 'mailbox_channel_sent') {
+            return [
+                ['sent', '=', true],
+                ['author_id.user_ids', 'in', [session.uid]]
+            ];
+        }
+        return this._super();
+    },
+});
 
-return base_obj.chat_manager;
+return {
+    'Manager': Manager,
+    'Mailbox': Mailbox,
+};
 
 });
